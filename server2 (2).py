@@ -1,3 +1,8 @@
+# -*- coding: utf-8 -*-
+"""
+SimpleLanDisk - 局域网双界面网盘（在原有功能上额外加入视频播放）
+"""
+
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 import os
@@ -17,6 +22,27 @@ RECYCLE_NAME = "$RecycleBin"
 SYSTEM_FOLDER = "$system"
 PORT = 8001
 # ===================================
+
+# ---------- 1️⃣ 视频后缀 & MIME ----------
+VIDEO_EXTS = {
+    ".mp4", ".webm", ".ogg", ".mov", ".avi",
+    ".mkv", ".flv", ".wmv", ".mpg", ".mpeg",
+    ".ts"                     # 支持 MPEG‑TS
+}
+VIDEO_MIME = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".ogg": "video/ogg",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".flv": "video/x-flv",
+    ".wmv": "video/x-ms-wmv",
+    ".mpg": "video/mpeg",
+    ".mpeg": "video/mpeg",
+    ".ts": "video/mp2t"
+}
+# -------------------------------------
 
 first_user = list(ACCOUNTS.values())[0]
 RECYCLE_DIR = os.path.join(first_user["root"], RECYCLE_NAME)
@@ -65,6 +91,7 @@ QUOTES_LIST = [
     ("Herb Sutter", "不要重复自己。")
 ]
 
+# ---------- 2️⃣ STYLE_NEW（新增 video‑wrapper 样式） ----------
 STYLE_NEW = """
 <style>
 body{font-family:Arial,sans-serif;max-width:960px;margin:24px auto;padding:0 18px;background:#f0f2f5;color:#222;}
@@ -74,8 +101,22 @@ body{font-family:Arial,sans-serif;max-width:960px;margin:24px auto;padding:0 18p
 a{color:#2563eb;text-decoration:none;margin:0 8px;}
 a:hover{text-decoration:underline;}
 input{padding:5px;}
+
+/* ==== 视频播放器专用样式 ==== */
+.video-wrapper{
+    margin:12px 0;
+    text-align:center;
+}
+.video-wrapper video{
+    max-width:100%;
+    height:auto;
+    border:1px solid #d1d5db;
+    border-radius:4px;
+    background:#000;
+}
 </style>
 """
+# ----------------------------------------------------------
 
 STYLE_OLD = """
 <style>
@@ -233,8 +274,22 @@ async def browse(request: Request, subpath: str = "", search: str = ""):
         if os.path.isdir(full):
             filelist_html += f'<div class="item">📂 <a href="/browse/{encoded_name}">{name}</a> <a href="/trash/move/{encoded_name}">[移入回收站]</a></div>\n'
         else:
-            filelist_html += f'<div class="item">📄 <a href="/download/{encoded_name}">{name}</a> <a href="/openlink/{encoded_name}">[直链]</a> <a href="/trash/move/{encoded_name}">[移入回收站]</a></div>\n'
+            # ----------------- 视频文件检测 -----------------
+            _, ext = os.path.splitext(name)
+            if ext.lower() in VIDEO_EXTS:
+                # 视频文件额外添加 “播放” 链接
+                filelist_html += (
+                    f'<div class="item">📽 '
+                    f'<a href="/download/{encoded_name}">{name}</a> '
+                    f'<a href="/watch/{encoded_name}">[播放]</a> '
+                    f'<a href="/openlink/{encoded_name}">[直链]</a> '
+                    f'<a href="/trash/move/{encoded_name}">[移入回收站]</a></div>\n'
+                )
+            else:
+                # 普通文件
+                filelist_html += f'<div class="item">📄 <a href="/download/{encoded_name}">{name}</a> <a href="/openlink/{encoded_name}">[直链]</a> <a href="/trash/move/{encoded_name}">[移入回收站]</a></div>\n'
 
+    # ----------------- 页面渲染 -----------------
     if skin == "new":
         page_html = f"""
 <html>
@@ -335,19 +390,85 @@ async def open_link_page(request: Request, subpath: str):
     return HTMLResponse(html)
 
 
+# ====================== 5️⃣ 新增视频播放页面 ======================
+@app.get("/watch/{subpath:path}")
+async def watch_video(request: Request, subpath: str):
+    """
+    纯 HTML + CSS 的视频播放页（不依赖 JavaScript）。
+    利用已经实现的 /stream 接口进行流式输出。
+    """
+    info = get_session_info(request)
+    if info is None:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user_root = info["root"]
+    skin = info["skin"]
+
+    try:
+        video_path = safe_join(user_root, subpath)
+    except ValueError:
+        return HTMLResponse(PAGE_ERROR)
+
+    if not os.path.isfile(video_path):
+        return HTMLResponse(PAGE_ERROR)
+
+    # 文件名 & MIME
+    filename = os.path.basename(unquote(subpath))
+    video_url = f"/stream/{quote(subpath)}"
+    _, ext = os.path.splitext(filename)
+    mime_type = VIDEO_MIME.get(ext.lower(), "video/mp4")   # 默认 fallback 为 mp4
+
+    style = STYLE_NEW if skin == "new" else STYLE_OLD
+
+    html = f"""
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>▶ 播放 - {filename}</title>
+{style}
+</head>
+<body>
+<div class="wrap">
+<h2>▶ 正在播放：{filename}</h2>
+
+<div class="video-wrapper">
+    <video controls preload="metadata">
+        <source src="{video_url}" type="{mime_type}">
+        您的浏览器不支持 HTML5 视频播放。
+    </video>
+</div>
+
+<p>
+    <a href="/browse/{quote(os.path.dirname(subpath))}">← 返回目录</a> |
+    <a href="/">← 回到根目录</a>
+</p>
+</div>
+</body>
+</html>
+"""
+    return HTMLResponse(html)
+
+
+# ====================== 6️⃣ stream 端返回合适 MIME ======================
 @app.get("/stream/{subpath:path}")
 async def stream_video(request: Request, subpath: str):
     info = get_session_info(request)
     if info is None:
         return RedirectResponse(url="/login", status_code=302)
+
     user_root = info["root"]
     try:
         file_path = safe_join(user_root, subpath)
     except ValueError:
         return HTMLResponse(PAGE_ERROR)
+
     if not os.path.isfile(file_path):
         return HTMLResponse(PAGE_ERROR)
-    return FileResponse(file_path)
+
+    # 依据后缀返回正确的 Content‑Type，浏览器即可流式播放
+    _, ext = os.path.splitext(file_path)
+    mime = VIDEO_MIME.get(ext.lower(), "application/octet-stream")
+    return FileResponse(file_path, media_type=mime)
 
 
 @app.get("/trash")
